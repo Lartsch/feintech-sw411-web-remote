@@ -48,8 +48,7 @@ python3 web_remote.py --auto-port
 - This should preferably be setup as a system service (systemd/systemctl, Windows service, ...) and put it behind a reverse proxy like `nginx`
 
 ## Disclaimer
-- This works pretty well but is experimental!
-- There *might* be a bug, either with the firmwares OR the script. It happens regularly that the SW411 looks like it is turned off (red LED) but the command `r power!` still reports it to be on. I don't know why this happens. It isn't really an issue though.
+- This works pretty well but is experimental! Use it at your own risk.
+- There *might* be a bug, either with the firmware OR the way the script affects it. It happens regularly that the SW411 looks like it is turned off (red LED) but the command `r power!` still reports it to be on. I don't know why this happens. It isn't really an issue though, as far as I can tell 
 - I have not tested this with ALL available firmware versions. I have tested it on versions 2.10.13 and 2.10.14.
-- In my experience, you do NOT need to use the debug variant of these firmwares. The commands work in the "prod" firmware too.
-    - Debug log is less verbose in non-debug firmwares
+- In my experience, you do not need to use the debug variant of the firmware for this to work.
