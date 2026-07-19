@@ -17,10 +17,10 @@ I did this for myself.
 
 ## Features?
 - See screenshot:
-<img width="1057" height="1046" alt="image" src="https://github.com/user-attachments/assets/75c98f4b-0ae3-4175-a0b2-ffa41a7cb9ea" />
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/75c98f4b-0ae3-4175-a0b2-ffa41a7cb9ea" />
 
 - Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start:
-<img width="1017" height="545" alt="image" src="https://github.com/user-attachments/assets/f34bae7f-89df-439d-8500-5d3c49a5ee1b" />
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f34bae7f-89df-439d-8500-5d3c49a5ee1b" />
 
 - The state values are polled every 5s. If SW411 is detected as turned off, only the power state is polled.
 - The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off.
@@ -43,6 +43,7 @@ python3 web_remote.py --auto-port
 - The `--auto-port` flag will make the script auto-detect the correct port on Linux and Windows based on the VID/PID known to me.
 - You can also use `--port` instead to specify the serial port yourself
 - Use `--help` for more information
+- Obviously, this should preferably be setup as a system service (systemd/systemctl, Windows service, ...) which works perfectly (and put it behind a reverse proxy like `nginx` if you want)
 
 ## Disclaimer
 - This works pretty well but is experimental!
