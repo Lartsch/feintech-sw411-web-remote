@@ -5,10 +5,10 @@ A basic Python web remote based on serial port commands.
 A Python script that provides a web UI to remote control your Feintech SW411 (4x 8k HDMI switch with audio extractor and eARC/CEC support). The script communicates with the device via its serial port.
 
 ## Why use this?
-I did this for myself.
 - In my home theater setup, I got most devices in a cabinet. Among these are the SW411 and my homeserver.
 - Because the SW411 remote is based on infrared, the cabinet blocks its signals.
 - While the SW411 does the source switching mostly by itself, in my specific setup, there are cases where I need to manually switch the input source. And of course I dont want to move my butt from the couch to do that!
+- That was the motivation to find a way to remote control the SW411 without the physical remote.
 
 ## How does it work?
 - Simple Web UI with basically all features of the physical remote (and some more) is provided using `Flask`
@@ -23,7 +23,8 @@ I did this for myself.
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f34bae7f-89df-439d-8500-5d3c49a5ee1b" />
 
 - The state values are polled every 5s. If SW411 is detected as turned off, only the power state is polled.
-- The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off.
+- The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
+- It could easily be enhanced to support control via smart home apps likes Google Home.
 
 ## How to use it?
 - The script was tested on Linux (Debian) and Windows. Depending on your Windows installation, you might need to install additional dependencies. Was not needed in my case.
@@ -42,6 +43,7 @@ python3 web_remote.py --auto-port
 ```
 - The `--auto-port` flag will make the script auto-detect the correct port on Linux and Windows based on the VID/PID known to me.
 - You can also use `--port` instead to specify the serial port yourself
+- The URL of the UI is shown at startup. You can also change the address/port.
 - Use `--help` for more information
 - Obviously, this should preferably be setup as a system service (systemd/systemctl, Windows service, ...) which works perfectly (and put it behind a reverse proxy like `nginx` if you want)
 
