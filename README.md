@@ -45,7 +45,7 @@ python3 web_remote.py --auto-port
 - You can also use `--port` instead to specify the serial port yourself
 - The URL of the UI is shown at startup. You can also change the address/port.
 - Use `--help` for more information
-- Obviously, this should preferably be setup as a system service (systemd/systemctl, Windows service, ...) which works perfectly (and put it behind a reverse proxy like `nginx` if you want)
+- This should preferably be setup as a system service (systemd/systemctl, Windows service, ...) and put it behind a reverse proxy like `nginx`
 
 ## Disclaimer
 - This works pretty well but is experimental!
