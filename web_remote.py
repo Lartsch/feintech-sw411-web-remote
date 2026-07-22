@@ -22,7 +22,7 @@ state = {
     "debug_log": "Unknown"
 }
 
-command_queue = []
+command_queue = collections.deque()
 device_logs = collections.deque(maxlen=5000)
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -137,7 +137,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="row">
                     <span class="label">System</span>
                     <div class="btn-group">
-                        <button id="btn-system-reboot" class="btn-danger" onclick="sendCommand('reboot!')">Reboot</button>
+                        <button id="btn-system-reboot" class="btn-danger" onclick="if(confirm('Are you sure you want to reboot the device?')) sendCommand('reboot!')">Reboot</button>
+                        <button id="btn-system-reset" class="btn-danger" onclick="if(confirm('Are you sure you want to factory reset the device?')) sendCommand('reset!')">Reset</button>
                     </div>
                 </div>
             </div>
@@ -149,6 +150,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div style="display: flex; gap: 10px;">
                 <input type="text" id="terminal-input" placeholder="Enter custom command (e.g. r type!)" style="flex-grow: 1; padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: #1e293b; color: white; font-family: monospace; outline: none;" onkeypress="if(event.key === 'Enter') sendCustomCommand()">
                 <button onclick="sendCustomCommand()">Send</button>
+                <button id="btn-record-logs" onclick="toggleRecording()" style="background: #10b981;">Start Recording</button>
             </div>
         </div>
     </div>
@@ -181,12 +183,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         fetch('/api/status')
             .then(r => r.json())
             .then(data => {
-                const isPoweredOff = data.power === 'off';
+                const isDisconnected = data.power === 'Unknown';
+                const isPoweredOff = data.power === 'off' || isDisconnected;
                 
                 document.getElementById('type').innerText = data.type;
                 document.getElementById('fw_version').innerText = data.fw_version;
                 document.getElementById('temperature').innerText = data.temperature !== 'Unknown' ? data.temperature + ' °C' : '-';
-                document.getElementById('power').innerText = data.power.toUpperCase();
+                document.getElementById('power').innerText = isDisconnected ? 'DISCONNECTED' : data.power.toUpperCase();
                 document.getElementById('auto_switch').innerText = data.auto_switch.toUpperCase();
                 
                 let modeText = data.auto_mode;
@@ -208,6 +211,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 const rebootBtn = document.getElementById('btn-system-reboot');
                 if (rebootBtn) rebootBtn.disabled = isPoweredOff;
+                const resetBtn = document.getElementById('btn-system-reset');
+                if (resetBtn) resetBtn.disabled = isPoweredOff;
                 
                 const deviceStatusCard = document.getElementById('device-status-card');
                 if (isPoweredOff) {
@@ -273,6 +278,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .catch(e => console.error('Error sending command:', e));
     }
 
+    let isRecording = false;
+    let recordedLogs = [];
+    let lastRecordedId = -1;
+
+    function toggleRecording() {
+        const btn = document.getElementById('btn-record-logs');
+        if (!isRecording) {
+            isRecording = true;
+            recordedLogs = [];
+            btn.innerText = 'Stop Recording';
+            btn.style.background = '#ef4444'; // Red color
+        } else {
+            isRecording = false;
+            btn.innerText = 'Start Recording';
+            btn.style.background = '#10b981'; // Green color
+            downloadLogs();
+        }
+    }
+
+    function downloadLogs() {
+        if (recordedLogs.length === 0) {
+            alert('No logs recorded.');
+            return;
+        }
+        const blob = new Blob([recordedLogs.join(String.fromCharCode(10))], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        a.download = `sw411-logs-${timestamp}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
     function updateLogs() {
         if (document.getElementById('terminal-section').style.display === 'none') return;
         fetch('/api/logs')
@@ -280,7 +321,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             .then(logs => {
                 const term = document.getElementById('terminal-output');
                 const isScrolledToBottom = term.scrollHeight - term.clientHeight <= term.scrollTop + 2;
-                term.innerHTML = logs.join('');
+                
+                let htmlContent = [];
+                logs.forEach(log => {
+                    if (log.type === 'rx') {
+                        htmlContent.push(`<div style="color: #f8fafc;">${log.html}</div>`);
+                    } else {
+                        htmlContent.push(`<div style="color: #38bdf8; font-weight: bold;">> ${log.html}</div>`);
+                    }
+                    
+                    if (isRecording && log.id > lastRecordedId) {
+                        recordedLogs.push((log.type === 'tx' ? '> ' : '') + log.raw);
+                    }
+                });
+                
+                if (logs.length > 0) {
+                    lastRecordedId = logs[logs.length - 1].id;
+                }
+                
+                term.innerHTML = htmlContent.join('');
                 if (isScrolledToBottom) {
                     term.scrollTop = term.scrollHeight;
                 }
@@ -302,12 +361,26 @@ def find_sw411_port():
             return port.device
     return None
 
+log_counter = 0
+def add_device_log(raw_text, log_type="rx"):
+    global log_counter
+    log_counter += 1
+    device_logs.append({
+        "id": log_counter, 
+        "raw": raw_text,
+        "html": html.escape(raw_text),
+        "type": log_type
+    })
+
+TEMP_REGEX = re.compile(r"gsv chip temperature:\s*(\d+)")
+SOURCE_REGEX = re.compile(r"output->input(\d+)")
+
 def parse_line(line):
     global state
     line_lower = line.lower()
     
     if "gsv chip temperature:" in line_lower:
-        match = re.search(r"gsv chip temperature:\s*(\d+)", line_lower)
+        match = TEMP_REGEX.search(line_lower)
         if match:
             state["temperature"] = match.group(1)
     elif "mcu fw version:" in line_lower:
@@ -323,7 +396,7 @@ def parse_line(line):
     elif "auto switch mode:" in line_lower:
         state["auto_mode"] = line_lower.split("auto switch mode:")[-1].strip()
     elif "output->input" in line_lower:
-        match = re.search(r"output->input(\d+)", line_lower)
+        match = SOURCE_REGEX.search(line_lower)
         if match:
             state["in_source"] = match.group(1)
     elif "debug log on" in line_lower:
@@ -335,67 +408,87 @@ def parse_line(line):
 
 def serial_worker(port, baudrate=115200):
     global state, command_queue
-    try:
-        ser = serial.Serial(port, baudrate, timeout=0.1)
-        print(f"Successfully connected to {port}")
-    except serial.SerialException as e:
-        print(f"Error opening serial port: {e}")
-        return
-
-    # Initial boot sequence commands
-    init_commands = [
-        "s debug log 0!",
-        "r type!", "r fw version!", "r power!", "r temperature!",
-        "r auto switch!", "r auto mode!", "r earc!", "r in source!"
-    ]
     
-    for cmd in init_commands:
-        ser.write(cmd.encode('utf-8'))
-        time.sleep(0.2)
-        
-    time.sleep(0.5)
-    while ser.in_waiting:
-        line = ser.readline().decode('utf-8', errors='ignore').strip()
-        if line:
-            parse_line(line)
-            
-    startup_complete = True
-        
-    last_temp_poll = time.time()
-
     while True:
+        ser = None
         try:
-            # Process queued commands from web UI
-            while command_queue:
-                cmd = command_queue.pop(0)
-                ser.write(cmd.encode('utf-8'))
-                time.sleep(0.1) 
+            ser = serial.Serial(port, baudrate, timeout=0.1)
+            print(f"Successfully connected to {port}")
             
-            # Background polling for dynamic states every 5 seconds
-            if time.time() - last_temp_poll > 5:
-                if state.get("power") == "off":
-                    poll_cmds = [b"r power!"]
-                else:
-                    poll_cmds = [b"r temperature!", b"r power!", b"r auto switch!", b"r auto mode!", b"r earc!", b"r in source!"]
+            # Initial boot sequence commands
+            init_commands = [
+                "s debug log 0!",
+                "r type!", "r fw version!", "r power!", "r temperature!",
+                "r auto switch!", "r auto mode!", "r earc!", "r in source!"
+            ]
+            
+            for cmd in init_commands:
+                ser.write(cmd.encode('utf-8'))
+                time.sleep(0.2)
                 
-                for poll_cmd in poll_cmds:
-                    ser.write(poll_cmd)
-                    time.sleep(0.1)
-                last_temp_poll = time.time()
-                
-            # Read all available lines
+            time.sleep(0.5)
             while ser.in_waiting:
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
                 if line:
-                    print(f"[Device] {line}")
-                    if startup_complete:
-                        device_logs.append(f'<div style="color: #f8fafc;">{html.escape(line)}</div>')
                     parse_line(line)
                     
-            time.sleep(0.05)
+            startup_complete = True
+            last_temp_poll = time.time()
+            
+            while True:
+                # Process queued commands from web UI
+                while command_queue:
+                    cmd = command_queue.popleft()
+                    ser.write(cmd.encode('utf-8'))
+                    time.sleep(0.1) 
+                
+                # Background polling for dynamic states every 5 seconds
+                if time.time() - last_temp_poll > 5:
+                    ser.write(b"r power!")
+                    time.sleep(0.2) # Give device time to respond to power query
+                    
+                    # Read immediate response to update power state
+                    while ser.in_waiting:
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                        if line:
+                            print(f"[Device] {line}")
+                            if startup_complete:
+                                add_device_log(line, "rx")
+                            parse_line(line)
+                    
+                    if state.get("power") == "on":
+                        poll_cmds = [b"r temperature!", b"r auto switch!", b"r auto mode!", b"r earc!", b"r in source!"]
+                        for poll_cmd in poll_cmds:
+                            ser.write(poll_cmd)
+                            time.sleep(0.1)
+                            
+                    last_temp_poll = time.time()
+                    
+                # Read all available lines
+                while ser.in_waiting:
+                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        print(f"[Device] {line}")
+                        if startup_complete:
+                            add_device_log(line, "rx")
+                        parse_line(line)
+                        
+                time.sleep(0.05)
+                
         except Exception as e:
             print(f"Serial communication error: {e}")
-            time.sleep(1)
+            if ser:
+                try:
+                    ser.close()
+                except:
+                    pass
+            
+            # Reset state and clear stale commands on disconnect
+            for key in state:
+                state[key] = "Unknown"
+            command_queue.clear()
+            
+            time.sleep(2)
 
 @app.route('/')
 def index():
@@ -407,38 +500,23 @@ def get_status():
 
 @app.route('/api/logs', methods=['GET'])
 def get_logs():
-    return jsonify(list(device_logs))
-
-@app.route('/api/terminal_command', methods=['POST'])
-def send_terminal_command():
-    data = request.json
-    if not data or 'command' not in data:
-        return jsonify({"error": "No command provided"}), 400
-        
-    cmd = data['command']
-    cmd = cmd.rstrip('!') + '!'
-    device_logs.append(f'<div style="color: #38bdf8; font-weight: bold;">> {html.escape(cmd)}</div>')
-    command_queue.append(cmd)
-    
-    return jsonify({"status": "queued"})
+    try:
+        # Shallow copy to prevent RuntimeError if mutated during iteration
+        logs_list = list(device_logs)
+    except RuntimeError:
+        logs_list = []
+    return jsonify(logs_list)
 
 @app.route('/api/command', methods=['POST'])
+@app.route('/api/terminal_command', methods=['POST'])
 def send_command():
     data = request.json
     if not data or 'command' not in data:
         return jsonify({"error": "No command provided"}), 400
         
     cmd = data['command']
-    cmd_lower = cmd.lower()
-    
-    # Enforce constraints
-    if "reset" in cmd_lower or "help" in cmd_lower or "hdcp" in cmd_lower:
-        return jsonify({"error": "Command not permitted"}), 403
-        
-    # Ensure command ends with exactly one !
     cmd = cmd.rstrip('!') + '!'
-    device_logs.append(f'<div style="color: #38bdf8; font-weight: bold;">> {html.escape(cmd)}</div>')
-        
+    add_device_log(cmd, "tx")
     command_queue.append(cmd)
     
     return jsonify({"status": "queued"})
