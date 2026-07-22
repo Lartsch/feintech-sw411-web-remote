@@ -17,7 +17,7 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 
 ## Features?
 - See screenshot:
-<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/75c98f4b-0ae3-4175-a0b2-ffa41a7cb9ea" />
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/ee5db214-fab4-4b2e-9e20-e69dcfbd6f64" />
 
 - Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start:
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f34bae7f-89df-439d-8500-5d3c49a5ee1b" />
