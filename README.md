@@ -23,9 +23,11 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f34bae7f-89df-439d-8500-5d3c49a5ee1b" />
 
 - The state values are polled every 5s. If SW411 is detected as turned off, only the power state is polled.
-- The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
-- I could not find any serial commands to change the audio mode. Therefore, this physical remote feature is not supported in the web remote.
 - The tool could easily be enhanced to support control via smart home apps likes Google Home, for example using Sinric.
+- **Unsupported features:**
+    - The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
+    - I could not find any serial commands to change the audio mode. Therefore, this physical remote feature is not supported in the web remote.
+
 
 ## How to use it?
 - The script was tested on Linux (Debian) and Windows. Depending on your Windows installation, you might need to install additional dependencies. Was not needed in my case.
