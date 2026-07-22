@@ -27,6 +27,7 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 - **Unsupported features:**
     - The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
     - I could not find any serial commands to change the audio mode. Therefore, this physical remote feature is not supported in the web remote.
+    - The HDCP-related serial commands also seem to be dysfunctional. Not included therefore.
 
 
 ## How to use it?
