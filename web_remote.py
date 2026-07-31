@@ -51,10 +51,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 25px; }
         .card { background: var(--card-bg); padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); }
         h2 { font-size: 1.3rem; color: var(--accent); margin-top: 0; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 8px; margin-bottom: 15px; }
-        .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .label { font-weight: 600; color: var(--text-muted); }
+        .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 15px; }
+        .control-row { display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; }
+        .control-row .btn-group { justify-content: flex-start; }
+        .label { font-weight: 600; color: var(--text-muted); flex-shrink: 0; }
         .val { font-size: 1.1rem; font-weight: 500; }
-        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
         button { background: var(--primary); border: none; color: white; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: all 0.2s; font-weight: 600; font-size: 0.95rem; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
         button:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
         button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
@@ -100,41 +102,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="card" style="grid-column: 1 / -1;">
             <h2>Controls</h2>
             <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px 30px;">
-                <div class="row">
+                <div class="control-row">
                     <span class="label">Power</span>
                     <div class="btn-group">
                         <button id="btn-power-1" onclick="sendCommand('power 1!')">On</button>
                     </div>
                 </div>
-                <div class="row">
+                <div class="control-row">
                     <span class="label">Auto Switch</span>
                     <div class="btn-group">
                         <button id="btn-auto_switch-1" onclick="sendCommand('s auto switch 1!')">On</button>
                         <button id="btn-auto_switch-0" onclick="sendCommand('s auto switch 0!')">Off</button>
                     </div>
                 </div>
-                <div class="row">
+                <div class="control-row">
                     <span class="label">Auto Mode</span>
-                    <div class="btn-group" style="flex-wrap: nowrap;">
+                    <div class="btn-group">
                         <button id="btn-auto_mode-1" onclick="sendCommand('s auto mode 1!')">1: 5V Mode</button>
                         <button id="btn-auto_mode-0" onclick="sendCommand('s auto mode 0!')">0: Clock Mode</button>
                     </div>
                 </div>
-                <div class="row">
+                <div class="control-row">
                     <span class="label">eARC</span>
                     <div class="btn-group">
                         <button id="btn-earc-1" onclick="sendCommand('s earc 1!')">On</button>
                         <button id="btn-earc-0" onclick="sendCommand('s earc 0!')">Off</button>
                     </div>
                 </div>
-                <div class="row">
+                <div class="control-row">
                     <span class="label">Debug Log</span>
                     <div class="btn-group">
                         <button id="btn-debug_log-1" onclick="sendCommand('s debug log 1!')">On</button>
                         <button id="btn-debug_log-0" onclick="sendCommand('s debug log 0!')">Off</button>
                     </div>
                 </div>
-                <div class="row">
+                <div class="control-row">
                     <span class="label">System</span>
                     <div class="btn-group">
                         <button id="btn-system-reboot" class="btn-danger" onclick="if(confirm('Are you sure you want to reboot the device?')) sendCommand('reboot!')">Reboot</button>
@@ -406,75 +408,220 @@ def parse_line(line):
     elif "8k 4x1 earc hdmi switcher" in line_lower:
         state["type"] = line.strip()
 
+# --- Serial Communication Settings ---
+UNSOLICITED_COOLDOWN = 10.0  # Seconds to pause commands after unsolicited device activity
+COMMAND_TIMEOUT = 1.0        # Seconds to wait for a specific command response
+POLL_INTERVAL = 5.0          # Seconds between background poll cycles
+
+def get_expected_patterns(cmd):
+    """Return expected response substrings for a given command.
+
+    Maps each command to the substring(s) that must appear in the device's
+    response line. Used to distinguish expected responses from unsolicited data.
+    Order matters: more specific patterns are checked first to avoid collisions
+    (e.g. 'auto mode' before 'auto switch', since both contain 'auto switch').
+    """
+    if isinstance(cmd, bytes):
+        cmd_lower = cmd.decode('utf-8', errors='ignore').lower()
+    else:
+        cmd_lower = cmd.lower()
+
+    if "auto mode" in cmd_lower:
+        return ["auto switch mode:"]
+    if "auto switch" in cmd_lower:
+        return ["auto switch:"]
+    if "in source" in cmd_lower:
+        return ["output->input"]
+    if "temperature" in cmd_lower:
+        return ["gsv chip temperature:"]
+    if "earc" in cmd_lower:
+        return ["earc:"]
+    if "debug log" in cmd_lower:
+        return ["debug log"]
+    if "r type" in cmd_lower:
+        return ["switcher"]
+    if "fw version" in cmd_lower:
+        return ["mcu fw version:"]
+    if "power" in cmd_lower:
+        return ["power on", "power off"]
+    return []
+
+# Protects serial port access. Currently all serial I/O runs in the
+# serial_worker thread, but the lock makes this explicit and safe if
+# the architecture ever changes (e.g. direct serial access from routes).
+serial_lock = threading.Lock()
+
+def send_and_wait(ser, cmd_bytes, timeout=COMMAND_TIMEOUT):
+    """Send a command and wait for its specific expected response.
+
+    Returns (success, unsolicited):
+    - success: True if the expected response was received within timeout.
+    - unsolicited: True if data arrived that does NOT match the expected
+      response pattern — indicating the device is busy with something
+      else (CEC event, HDMI handshake, auto-switch, etc.).
+
+    All received lines are parsed and logged regardless of classification.
+    If no expected pattern is known for the command, waits briefly and
+    returns success (we can't validate, so we assume it worked).
+    """
+    expected = get_expected_patterns(cmd_bytes)
+    ser.write(cmd_bytes)
+
+    # No known response pattern — give the device a moment and move on
+    if not expected:
+        time.sleep(0.15)
+        return True, False
+
+    deadline = time.monotonic() + timeout
+    unsolicited = False
+
+    while time.monotonic() < deadline:
+        if ser.in_waiting:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line:
+                print(f"[Device] {line}")
+                add_device_log(line, "rx")
+                parse_line(line)
+
+                if any(p in line.lower() for p in expected):
+                    return True, unsolicited  # Correct response received
+                else:
+                    unsolicited = True  # Data doesn't match — device is busy
+                continue
+        time.sleep(0.02)
+
+    # Timeout — device didn't send the expected response
+    return False, unsolicited
+
 def serial_worker(port, baudrate=115200):
     global state, command_queue
-    
+
     while True:
         ser = None
         try:
             ser = serial.Serial(port, baudrate, timeout=0.1)
             print(f"Successfully connected to {port}")
-            
-            # Initial boot sequence commands
+
+            # ── Initialization Phase ──
+            # Use send-and-wait discipline for each init command.
+            # Responses are parsed but not logged to the terminal.
             init_commands = [
                 "s debug log 0!",
                 "r type!", "r fw version!", "r power!", "r temperature!",
                 "r auto switch!", "r auto mode!", "r earc!", "r in source!"
             ]
-            
+
             for cmd in init_commands:
-                ser.write(cmd.encode('utf-8'))
-                time.sleep(0.2)
-                
-            time.sleep(0.5)
-            while ser.in_waiting:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    parse_line(line)
-                    
-            startup_complete = True
-            last_temp_poll = time.time()
-            
+                cmd_bytes = cmd.encode('utf-8')
+                expected = get_expected_patterns(cmd_bytes)
+                with serial_lock:
+                    ser.write(cmd_bytes)
+
+                    if expected:
+                        deadline = time.monotonic() + COMMAND_TIMEOUT
+                        while time.monotonic() < deadline:
+                            if ser.in_waiting:
+                                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                                if line:
+                                    parse_line(line)
+                                    if any(p in line.lower() for p in expected):
+                                        break
+                                continue
+                            time.sleep(0.02)
+                    else:
+                        time.sleep(0.2)
+
+            # Drain any remaining data from init
+            with serial_lock:
+                time.sleep(0.3)
+                while ser.in_waiting:
+                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        parse_line(line)
+
+            print("[Init] Startup sequence complete")
+
+            # ── Main Loop ──
+            cooldown_until = 0.0
+            last_poll_time = time.monotonic()
+
             while True:
-                # Process queued commands from web UI
-                while command_queue:
-                    cmd = command_queue.popleft()
-                    ser.write(cmd.encode('utf-8'))
-                    time.sleep(0.1) 
-                
-                # Background polling for dynamic states every 5 seconds
-                if time.time() - last_temp_poll > 5:
-                    ser.write(b"r power!")
-                    time.sleep(0.2) # Give device time to respond to power query
-                    
-                    # Read immediate response to update power state
+                now = time.monotonic()
+
+                # Step 1: Read any data that arrived while we were idle.
+                # We haven't sent a command, so any data here is unsolicited —
+                # the device is doing something on its own (CEC power-on,
+                # auto-switch, HDMI handshake, etc.). Trigger cooldown.
+                with serial_lock:
                     while ser.in_waiting:
                         line = ser.readline().decode('utf-8', errors='ignore').strip()
                         if line:
                             print(f"[Device] {line}")
-                            if startup_complete:
-                                add_device_log(line, "rx")
-                            parse_line(line)
-                    
-                    if state.get("power") == "on":
-                        poll_cmds = [b"r temperature!", b"r auto switch!", b"r auto mode!", b"r earc!", b"r in source!"]
-                        for poll_cmd in poll_cmds:
-                            ser.write(poll_cmd)
-                            time.sleep(0.1)
-                            
-                    last_temp_poll = time.time()
-                    
-                # Read all available lines
-                while ser.in_waiting:
-                    line = ser.readline().decode('utf-8', errors='ignore').strip()
-                    if line:
-                        print(f"[Device] {line}")
-                        if startup_complete:
                             add_device_log(line, "rx")
-                        parse_line(line)
-                        
+                            parse_line(line)
+                            cooldown_until = time.monotonic() + UNSOLICITED_COOLDOWN
+                            print(f"[Guard] Unsolicited data: '{line}' — pausing commands for {UNSOLICITED_COOLDOWN}s")
+
+                # Step 2: If in cooldown, skip all command sending.
+                # We still read data above (step 1) to keep state updated,
+                # and the cooldown extends if more unsolicited data arrives.
+                if now < cooldown_until:
+                    time.sleep(0.05)
+                    continue
+
+                # Step 3: Process ONE user command per iteration.
+                # User commands get priority over background polling.
+                # Only one command per iteration prevents piling up.
+                if command_queue:
+                    with serial_lock:
+                        cmd = command_queue.popleft()
+                        cmd_bytes = cmd.encode('utf-8')
+                        success, unsolicited = send_and_wait(ser, cmd_bytes)
+
+                        if unsolicited:
+                            cooldown_until = time.monotonic() + UNSOLICITED_COOLDOWN
+                            print(f"[Guard] Unsolicited data during user command — pausing for {UNSOLICITED_COOLDOWN}s")
+                        elif not success:
+                            cooldown_until = time.monotonic() + UNSOLICITED_COOLDOWN
+                            print(f"[Guard] User command timeout (device busy?) — pausing for {UNSOLICITED_COOLDOWN}s")
+
+                    time.sleep(0.05)
+                    continue  # Don't also poll this iteration
+
+                # Step 4: Background poll cycle.
+                # Only runs when no user commands are pending and cooldown is inactive.
+                if now - last_poll_time >= POLL_INTERVAL:
+                    with serial_lock:
+                        # Always check power first
+                        success, unsolicited = send_and_wait(ser, b"r power!")
+
+                        if unsolicited or not success:
+                            cooldown_until = time.monotonic() + UNSOLICITED_COOLDOWN
+                            print(f"[Guard] Interference during power poll — pausing for {UNSOLICITED_COOLDOWN}s")
+                            last_poll_time = time.monotonic()
+                            time.sleep(0.05)
+                            continue
+
+                        # Only poll full status if device is powered on
+                        if state.get("power") == "on":
+                            poll_cmds = [
+                                b"r temperature!",
+                                b"r auto switch!",
+                                b"r auto mode!",
+                                b"r earc!",
+                                b"r in source!",
+                            ]
+                            for poll_cmd in poll_cmds:
+                                success, unsolicited = send_and_wait(ser, poll_cmd)
+                                if unsolicited or not success:
+                                    cooldown_until = time.monotonic() + UNSOLICITED_COOLDOWN
+                                    print(f"[Guard] Interference during poll — pausing for {UNSOLICITED_COOLDOWN}s")
+                                    break
+
+                    last_poll_time = time.monotonic()
+
                 time.sleep(0.05)
-                
+
         except Exception as e:
             print(f"Serial communication error: {e}")
             if ser:
@@ -482,12 +629,12 @@ def serial_worker(port, baudrate=115200):
                     ser.close()
                 except:
                     pass
-            
+
             # Reset state and clear stale commands on disconnect
             for key in state:
                 state[key] = "Unknown"
             command_queue.clear()
-            
+
             time.sleep(2)
 
 @app.route('/')
@@ -502,7 +649,7 @@ def get_status():
 def get_logs():
     try:
         # Shallow copy to prevent RuntimeError if mutated during iteration
-        logs_list = list(device_logs)
+        logs_list = list(device_logs.copy())
     except RuntimeError:
         logs_list = []
     return jsonify(logs_list)
