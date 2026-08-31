@@ -53,7 +53,25 @@ python3 web_remote.py --auto-port
 - You can also use `--port` instead to specify the serial port yourself
 - Use `--input-X` where is from range 1-4 to update the label for the corresponding input source. Defaults to "Unnamed #X" 
 - The URL of the UI is shown at startup. You can also change the address/port.
-- Use `--help` for more information
+    - No support to change / disable the input source icons as of now. Just change in source if you want to.
+- Use `--help` for more information:
+    ```
+    usage: web_remote.py [-h] [--port PORT] [--auto-port] [--host HOST] [--web-port WEB_PORT] [--input-1 INPUT_1]
+                     [--input-2 INPUT_2] [--input-3 INPUT_3] [--input-4 INPUT_4]
+
+    Feintech SW411 Simple Web Remote
+    
+    options:
+      -h, --help           show this help message and exit
+      --port PORT          Serial port
+      --auto-port          Auto detect based on VID/PID
+      --host HOST          Host to bind
+      --web-port WEB_PORT  Port to bind
+      --input-1 INPUT_1    Label for Input 1
+      --input-2 INPUT_2    Label for Input 2
+      --input-3 INPUT_3    Label for Input 3
+      --input-4 INPUT_4    Label for Input 4
+    ```
 - This should preferably be setup as a system service (systemd/systemctl, Windows service, ...) and put it behind a reverse proxy like `nginx`
 
 ## Disclaimer and other notes
