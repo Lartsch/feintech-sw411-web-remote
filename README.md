@@ -51,9 +51,9 @@ python3 web_remote.py --auto-port
 ```
 - The `--auto-port` flag will make the script auto-detect the correct port on Linux and Windows based on the VID/PID known to me.
 - You can also use `--port` instead to specify the serial port yourself
-- Use `--input-X` where is from range 1-4 to update the label for the corresponding input source. Defaults to "Unnamed #X" 
+- Use `--input-X` where is from range 1-4 to update the label for the corresponding input source. Defaults to "Unnamed #X"
+    - - No support to change / disable the input source icons as of now. Just change in source if you want to.
 - The URL of the UI is shown at startup. You can also change the address/port.
-    - No support to change / disable the input source icons as of now. Just change in source if you want to.
 - Use `--help` for more information:
     ```
     usage: web_remote.py [-h] [--port PORT] [--auto-port] [--host HOST] [--web-port WEB_PORT] [--input-1 INPUT_1]
