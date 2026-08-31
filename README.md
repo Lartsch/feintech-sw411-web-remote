@@ -16,11 +16,12 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 - The serial commands were extracted from the SW411 firmware. These are not officially documented or supported.
 
 ## Features?
-- See screenshot:
-<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/ee5db214-fab4-4b2e-9e20-e69dcfbd6f64" />
+- See screenshots:
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/c703b9a5-60c6-4b5d-84a4-0634900c866d" />
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/0f89bc78-864d-4b6d-9b62-9fc133481d12" />
 
 - Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start! You can also hit the "Start Recording" button and "Stop Recording" will instantly download a log file of the record:
-<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f6a81cf2-8dfe-4f73-94bd-6ef191a4cd61" />
+<img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/c7056b6e-b77b-47e0-b9a0-f5614f1f27af" />
 
 - There is no automated polling. This was a conscious decision to prevent issues in timing etc. (for when the device is busy with other things, it could become confused when at the same time multiple read commands are emitted). It would be very easy to add though, if anyone needs it. I would not recommend it.
     - You can manually poll all states at once or single states by using the respective buttons. State is also updated when using some of the settings (debug mode, changing input source, etc).
