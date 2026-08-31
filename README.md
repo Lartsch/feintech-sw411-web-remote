@@ -19,10 +19,13 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 - See screenshot:
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/ee5db214-fab4-4b2e-9e20-e69dcfbd6f64" />
 
-- Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start! You can also hit the "Start Recording" button and "Stop Recording" will instantly download a log file:
+- Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start! You can also hit the "Start Recording" button and "Stop Recording" will instantly download a log file of the record:
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/f6a81cf2-8dfe-4f73-94bd-6ef191a4cd61" />
 
-- The state values are polled every 5s. If SW411 is detected as turned off, only the power state is polled.
+- There is no automated polling. This was a conscious decision to prevent issues in timing etc. (for when the device is busy with other things, it could become confused when at the same time multiple read commands are emitted). It would be very easy to add though, if anyone needs it. I would not recommend it.
+    - You can manually poll all states at once or single states by using the respective buttons. State is also updated when using some of the settings (debug mode, changing input source, etc).
+    - A last-update-timestamp is shown for each state
+    - The states are cached by the script as long as it runs. The cached values will be loaded on page load. If no values are cached on page load, it will show no value until states are updated.
 - The tool could easily be enhanced to support control via smart home apps likes Google Home, for example using Sinric.
 - **Unsupported features:**
     - The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
@@ -56,4 +59,4 @@ python3 web_remote.py --auto-port
 - There *might* be a bug, either with the firmware OR the way the script affects it. It happens regularly that the SW411 looks like it is turned off (red LED) but the command `r power!` still reports it to be on. I don't know why this happens. It isn't really an issue though, as far as I can tell. 
 - I have not tested this with ALL available firmware versions. I have tested it on versions 2.10.13 and 2.10.14.
 - In my experience, you do not need to use the debug variant of the firmware for this to work.
-- There is a bug in the firmware where in some setups, when using CEC and the PASS audio mode, after a CEC shutdown sequence, the SW411 and the device connected to the audio port turn on again. This does not happen when using any of the other audio modes.
+- There is a bug in the firmware where in some setups, when using CEC and the PASS audio mode, after a CEC shutdown sequence, the SW411 and the device connected to the audio port turn on again. This does not happen when using any of the other audio modes and is unrelated to this tool.
