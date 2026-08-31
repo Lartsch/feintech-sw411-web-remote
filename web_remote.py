@@ -29,6 +29,14 @@ state_timestamps = {}
 device_logs = collections.deque(maxlen=1000)
 log_counter = 0
 
+# Global dictionary to store input names
+input_names = {
+    1: "Unnamed 1",
+    2: "Unnamed 2",
+    3: "Unnamed 3",
+    4: "Unnamed 4"
+}
+
 def add_device_log(raw_text, log_type="rx"):
     global log_counter
     log_counter += 1
@@ -250,19 +258,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="source-grid">
         <button class="source-btn" id="btn-1" onclick="sendCommand('s in source 1!', this)">
             <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="6" ry="6"></rect><circle cx="17.5" cy="10.5" r="1"></circle><circle cx="14.5" cy="13.5" r="1"></circle><path d="M6 12h4m-2-2v4"></path></svg>
-            <div class="btn-content"><span class="label">Xbox</span><span class="sub-label">Input 1</span></div>
+            <div class="btn-content"><span class="label">{{ input1 }}</span><span class="sub-label">Input 1</span></div>
         </button>
         <button class="source-btn" id="btn-2" onclick="sendCommand('s in source 2!', this)">
             <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><path d="M8 21h8m-4-4v4"></path></svg>
-            <div class="btn-content"><span class="label">PC</span><span class="sub-label">Input 2</span></div>
+            <div class="btn-content"><span class="label">{{ input2 }}</span><span class="sub-label">Input 2</span></div>
         </button>
         <button class="source-btn" id="btn-3" onclick="sendCommand('s in source 3!', this)">
             <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect><path d="M17 2l-5 5-5-5"></path></svg>
-            <div class="btn-content"><span class="label">Waipu</span><span class="sub-label">Input 3</span></div>
+            <div class="btn-content"><span class="label">{{ input3 }}</span><span class="sub-label">Input 3</span></div>
         </button>
         <button class="source-btn" id="btn-4" onclick="sendCommand('s in source 4!', this)">
             <svg viewBox="0 0 24 24"><path d="M12 22v-5"></path><path d="M9 8V2"></path><path d="M15 8V2"></path><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"></path></svg>
-            <div class="btn-content"><span class="label">Spare</span><span class="sub-label">Input 4</span></div>
+            <div class="btn-content"><span class="label">{{ input4 }}</span><span class="sub-label">Input 4</span></div>
         </button>
     </div>
     
@@ -750,7 +758,14 @@ def get_status_patterns(status_type):
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    # Pass the stored names as keyword arguments to be parsed by Jinja
+    return render_template_string(
+        HTML_TEMPLATE,
+        input1=input_names[1],
+        input2=input_names[2],
+        input3=input_names[3],
+        input4=input_names[4]
+    )
 
 @app.route('/api/cached_state', methods=['GET'])
 def cached_state():
@@ -870,7 +885,20 @@ if __name__ == '__main__':
     parser.add_argument('--auto-port', action='store_true', help='Auto detect based on VID/PID')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind')
     parser.add_argument('--web-port', type=int, default=5000, help='Port to bind')
+    
+    # New Arguments for Input Sources
+    parser.add_argument('--input-1', type=str, default='Unnamed 1', help='Label for Input 1')
+    parser.add_argument('--input-2', type=str, default='Unnamed 2', help='Label for Input 2')
+    parser.add_argument('--input-3', type=str, default='Unnamed 3', help='Label for Input 3')
+    parser.add_argument('--input-4', type=str, default='Unnamed 4', help='Label for Input 4')
+    
     args = parser.parse_args()
+
+    # Load custom input names into the global dictionary
+    input_names[1] = args.input_1
+    input_names[2] = args.input_2
+    input_names[3] = args.input_3
+    input_names[4] = args.input_4
 
     target_port = args.port
     if args.auto_port:
