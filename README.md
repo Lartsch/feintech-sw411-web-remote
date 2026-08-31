@@ -23,10 +23,10 @@ A Python script that provides a web UI to remote control your Feintech SW411 (4x
 - Enabling the debug log feature will show an additional UI element providing the full log of data send to and received from the device. You can also enter your own commands there! Try `help!` for a start! You can also hit the "Start Recording" button and "Stop Recording" will instantly download a log file of the record:
 <img width="600" height="auto" alt="image" src="https://github.com/user-attachments/assets/c7056b6e-b77b-47e0-b9a0-f5614f1f27af" />
 
-- There is no automated polling. This was a conscious decision to prevent issues in timing etc. (for when the device is busy with other things, it could become confused when at the same time multiple read commands are emitted). It would be very easy to add though, if anyone needs it. I would not recommend it.
+- There is no periodic state polling of the device itself. This was a conscious decision to prevent issues in timing etc. (for when the device is busy with other things, it could become confused when at the same time multiple read commands are emitted). It would be very easy to add though, if anyone needs it. I would not recommend it.
     - You can manually poll all states at once or single states by using the respective buttons. State is also updated when using some of the settings (debug mode, changing input source, etc).
     - A last-update-timestamp is shown for each state
-    - The states are cached by the script as long as it runs. The cached values will be loaded on page load. If no values are cached on page load, it will show no value until states are updated.
+    - The states are cached by the script as long as it runs. The cached values will be polled on page load and every 3s as long as the page is visible/in focus . If no values are cached on page load, it will show no value until states are updated.
 - The tool could easily be enhanced to support control via smart home apps likes Google Home, for example using Sinric.
 - **Unsupported features:**
     - The `power 0!` (power off) command is not supported in the UI. Why? Because apparently the implementation of this commands leads to some kind of loop and the device doesnt turn off, as can be seen when enabling debug logs.
