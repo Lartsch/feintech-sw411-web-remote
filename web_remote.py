@@ -440,6 +440,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let recordedLogs = [];
     let lastRecordedId = -1;
     let stateTimestamps = {};
+    let isCommandExecuting = false;
+    let pollIntervalId = null;
     const ALL_KEYS = ['type','fw_version','temperature','power','auto_switch','auto_mode','earc','in_source','debug_log'];
     
     function showStatus(message, type) {
@@ -552,6 +554,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function sendCommand(cmd, btnElement) {
+        isCommandExecuting = true;
         if(btnElement && btnElement.classList.contains('source-btn')) {
             document.querySelectorAll('.source-btn').forEach(btn => btn.classList.remove('switching'));
             btnElement.classList.add('switching');
@@ -583,6 +586,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (data.state) updateUIState(data.state, data.timestamps);
             }
             updateLogs();
+            isCommandExecuting = false;
         })
         .catch(e => {
             if(btnElement) {
@@ -591,10 +595,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btnElement.style.opacity = '1';
             }
             showStatus('Network error occurred.', 'error');
+            isCommandExecuting = false;
         });
     }
 
     function fetchStatus(type, btnElement) {
+        isCommandExecuting = true;
         if(btnElement) {
             btnElement.style.opacity = '0.5';
             btnElement.style.pointerEvents = 'none';
@@ -613,6 +619,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 updateUIState(data.state, data.timestamps);
             }
             updateLogs();
+            isCommandExecuting = false;
         })
         .catch(e => {
             if(btnElement) {
@@ -620,6 +627,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btnElement.style.pointerEvents = 'auto';
             }
             showStatus('Failed to fetch status', 'error');
+            isCommandExecuting = false;
         });
     }
 
@@ -699,13 +707,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             .catch(e => console.error('Error fetching logs:', e));
     }
 
-    // Load cached state from server on page load (no serial poll)
-    fetch('/api/cached_state')
-        .then(r => r.json())
-        .then(data => {
-            if (data.state) updateUIState(data.state, data.timestamps);
-        })
-        .catch(() => {});
+    function pollCachedState() {
+        if (isCommandExecuting) return;
+        
+        fetch('/api/cached_state')
+            .then(r => r.json())
+            .then(data => {
+                if (data.state) updateUIState(data.state, data.timestamps);
+            })
+            .catch(() => {});
+    }
+
+    function startPolling() {
+        if (!pollIntervalId) {
+            pollIntervalId = setInterval(pollCachedState, 3000);
+        }
+    }
+
+    function stopPolling() {
+        if (pollIntervalId) {
+            clearInterval(pollIntervalId);
+            pollIntervalId = null;
+        }
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+            pollCachedState(); // Instantly poll on return to focus
+            startPolling();
+        } else {
+            stopPolling();
+        }
+    });
+
+    // Initial setup on page load
+    if (document.visibilityState === "visible") {
+        pollCachedState();
+        startPolling();
+    }
 
 </script>
 </body>
