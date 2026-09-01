@@ -9,27 +9,33 @@ import html
 from flask import Flask, jsonify, request, render_template_string
 
 app = Flask(__name__)
-serial_lock = threading.Lock()
+
+# --- Serial connection (guarded by serial_lock) --------------------------------
+serial_conn = None
 target_port = None
+serial_lock = threading.Lock()
 
+# --- Device state / logs (guarded by state_lock) -------------------------------
+# Flask serves requests on multiple worker threads while the serial reader runs
+# on its own thread, so every access to the shared state below must be locked.
+state_lock = threading.Lock()
+
+# Pure Python native types (None, True/False, Ints)
 state = {
-    "type": "Unknown",
-    "fw_version": "Unknown",
-    "power": "Unknown",
-    "temperature": "Unknown",
-    "auto_switch": "Unknown",
-    "auto_mode": "Unknown",
-    "earc": "Unknown",
-    "in_source": "Unknown",
-    "debug_log": "Unknown"
+    "type": None,
+    "fw_version": None,
+    "power": None,
+    "temperature": None,
+    "auto_switch": None,
+    "auto_mode": None,
+    "earc": None,
+    "in_source": None,
+    "debug_log": None
 }
-
 state_timestamps = {}
-
-device_logs = collections.deque(maxlen=1000)
+device_logs = collections.deque(maxlen=5000)
 log_counter = 0
 
-# Global dictionary to store input names
 input_names = {
     1: "Unnamed 1",
     2: "Unnamed 2",
@@ -37,54 +43,191 @@ input_names = {
     4: "Unnamed 4"
 }
 
+# Precompiled once, reused on every parsed line.
+TEMP_REGEX = re.compile(r"gsv chip temperature\D*(\d+)")
+SOURCE_REGEX = re.compile(r"output->input(\d+)")
+WHITESPACE_REGEX = re.compile(r"\s+")
+
+# Canonical read commands for every queryable status field. Keeping this as a
+# single mapping removes the old bytes/decode round-trip and the duplicated
+# special-casing of "type" / "fw_version".
+STATUS_COMMANDS = {
+    "type": "r type!",
+    "fw_version": "r fw version!",
+    "temperature": "r temperature!",
+    "power": "r power!",
+    "auto_switch": "r auto switch!",
+    "auto_mode": "r auto mode!",
+    "earc": "r earc!",
+    "in_source": "r in source!",
+}
+# Order used when the client asks for "all" (debug_log intentionally excluded:
+# the device only reports it when the debug mode is toggled).
+ALL_STATUS_ORDER = [
+    "type", "fw_version", "temperature", "power",
+    "auto_switch", "auto_mode", "earc", "in_source",
+]
+
+
 def add_device_log(raw_text, log_type="rx"):
     global log_counter
-    log_counter += 1
-    device_logs.append({
-        "id": log_counter, 
-        "raw": raw_text,
-        "html": html.escape(raw_text),
-        "type": log_type
-    })
+    with state_lock:
+        log_counter += 1
+        device_logs.append({
+            "id": log_counter,
+            "raw": raw_text,
+            "html": html.escape(raw_text),
+            "type": log_type
+        })
 
-TEMP_REGEX = re.compile(r"gsv chip temperature:\s*(\d+)")
-SOURCE_REGEX = re.compile(r"output->input(\d+)")
 
 def _update_state(key, value):
-    global state, state_timestamps
-    state[key] = value
-    state_timestamps[key] = time.time()
+    with state_lock:
+        state[key] = value
+        state_timestamps[key] = time.time()
+
 
 def parse_line(line):
-    global state
-    line_lower = line.lower()
-    
-    if "gsv chip temperature:" in line_lower:
+    # Normalise so that write-command echoes and read-command responses parse
+    # identically. The device has two quirks we neutralise here:
+    #   1. Write echoes carry a trailing "!"  ->  "auto switch on!"
+    #      Read responses do not              ->  "auto switch: on"
+    #   2. Read responses put a colon between label and value ("earc: off"),
+    #      write echoes use a plain space      ("earc off").
+    # Stripping any trailing "!", removing colons and collapsing whitespace
+    # reduces BOTH forms to a canonical "<label> <value>" string, so every
+    # branch below matches regardless of read/write origin.
+    raw = line.strip()
+    while raw.endswith("!"):
+        raw = raw[:-1].strip()
+    canonical = WHITESPACE_REGEX.sub(" ", raw.replace(":", " ")).strip()
+    line_lower = canonical.lower()
+
+    if "gsv chip temperature" in line_lower:
         match = TEMP_REGEX.search(line_lower)
         if match:
-            _update_state("temperature", match.group(1))
-    elif "mcu fw version:" in line_lower:
-        _update_state("fw_version", line_lower.split("version:")[-1].strip())
-    elif "earc:" in line_lower:
-        _update_state("earc", line_lower.split("earc:")[-1].strip())
+            _update_state("temperature", int(match.group(1)))
+    elif line_lower.startswith("mcu fw version"):
+        _update_state("fw_version", line_lower.split("version", 1)[-1].strip())
+    elif line_lower.startswith("auto switch mode"):
+        val = line_lower.split("auto switch mode", 1)[-1].strip()
+        if "5v" in val or "1" in val:
+            _update_state("auto_mode", 1)
+        elif "clock" in val or "0" in val:
+            _update_state("auto_mode", 0)
+    elif line_lower.startswith("auto switch"):
+        val = line_lower.split("auto switch", 1)[-1].strip()
+        _update_state("auto_switch", val in ["on", "1"])
+    elif line_lower.startswith("earc"):
+        val = line_lower.split("earc", 1)[-1].strip()
+        _update_state("earc", val in ["on", "1"])
     elif "power on" in line_lower:
-        _update_state("power", "on")
+        _update_state("power", True)
     elif "power off" in line_lower:
-        _update_state("power", "off")
-    elif "auto switch:" in line_lower:
-        _update_state("auto_switch", line_lower.split("auto switch:")[-1].strip())
-    elif "auto switch mode:" in line_lower:
-        _update_state("auto_mode", line_lower.split("auto switch mode:")[-1].strip())
+        _update_state("power", False)
     elif "output->input" in line_lower:
         match = SOURCE_REGEX.search(line_lower)
         if match:
-            _update_state("in_source", match.group(1))
+            _update_state("in_source", int(match.group(1)))
     elif "debug log on" in line_lower:
-        _update_state("debug_log", "on")
+        _update_state("debug_log", True)
     elif "debug log off" in line_lower:
-        _update_state("debug_log", "off")
+        _update_state("debug_log", False)
     elif "8k 4x1 earc hdmi switcher" in line_lower:
-        _update_state("type", line.strip())
+        _update_state("type", raw)
+
+
+# Formats the raw Python state into an exact rendering payload for JS
+def generate_ui_state():
+    with state_lock:
+        s = dict(state)  # cheap consistent snapshot; render outside the lock
+    return {
+        "texts": {
+            "type": s["type"] if s["type"] is not None else "-",
+            "fw_version": s["fw_version"] if s["fw_version"] is not None else "-",
+            "temperature": f"{s['temperature']} °C" if s["temperature"] is not None else "-",
+            "power": "On" if s["power"] is True else "Off" if s["power"] is False else "-",
+            "auto_switch": "On" if s["auto_switch"] is True else "Off" if s["auto_switch"] is False else "-",
+            "auto_mode": "1: 5V" if s["auto_mode"] == 1 else "0: Clock" if s["auto_mode"] == 0 else "-",
+            "earc": "On" if s["earc"] is True else "Off" if s["earc"] is False else "-",
+            "in_source": f"Input {s['in_source']}" if s["in_source"] is not None else "-",
+            "debug_log": "On" if s["debug_log"] is True else "Off" if s["debug_log"] is False else "-"
+        },
+        "active_buttons": [
+            "btn-power-on" if s["power"] is True else None,
+            "btn-power-off" if s["power"] is False else None,
+            "btn-autoswitch-on" if s["auto_switch"] is True else None,
+            "btn-autoswitch-off" if s["auto_switch"] is False else None,
+            "btn-automode-1" if s["auto_mode"] == 1 else None,
+            "btn-automode-0" if s["auto_mode"] == 0 else None,
+            "btn-earc-on" if s["earc"] is True else None,
+            "btn-earc-off" if s["earc"] is False else None,
+            "btn-debuglog-on" if s["debug_log"] is True else None,
+            "btn-debuglog-off" if s["debug_log"] is False else None,
+            f"btn-{s['in_source']}" if s["in_source"] is not None else None
+        ],
+        "show_terminal": s["debug_log"] is True
+    }
+
+
+def serial_reader_loop():
+    global serial_conn, target_port
+    while True:
+        try:
+            if serial_conn is None or not serial_conn.is_open:
+                print(f"Attempting to connect to {target_port}...")
+                conn = serial.Serial(target_port, 115200, timeout=1.0, write_timeout=2.0)
+                try:
+                    conn.reset_input_buffer()
+                except Exception:
+                    pass
+                with serial_lock:
+                    serial_conn = conn
+                print(f"Connected to {target_port}")
+
+            line = serial_conn.readline()
+            if line:
+                decoded = line.decode("utf-8", errors="ignore").strip()
+                if decoded:
+                    print(f"[Device] {decoded}")
+                    add_device_log(decoded, "rx")
+                    parse_line(decoded)
+
+        except serial.SerialException as e:
+            print(f"Serial connection error: {e}. Retrying in 5s...")
+            with serial_lock:
+                if serial_conn:
+                    try:
+                        serial_conn.close()
+                    except Exception:
+                        pass
+                serial_conn = None
+            time.sleep(5)
+        except Exception as e:
+            print(f"Unexpected read error: {e}")
+            time.sleep(5)
+
+
+def send_serial_cmd(cmd_str):
+    # Serialise all writes (and the connection check) so a reconnect on the
+    # reader thread can never swap the port out from under an in-flight write.
+    with serial_lock:
+        conn = serial_conn
+        if not (conn and conn.is_open):
+            return False
+        add_device_log(cmd_str, "tx")
+        try:
+            conn.write(cmd_str.encode("utf-8"))
+            return True
+        except Exception as e:
+            print(f"Write error: {e}")
+            return False
+
+
+def is_serial_connected():
+    with serial_lock:
+        return serial_conn is not None and serial_conn.is_open
+
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -124,29 +267,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             box-sizing: border-box;
         }
 
-        .container {
-            width: 100%;
-            max-width: 480px;
-            background: var(--container-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--container-border);
-            border-radius: 24px;
-            padding: 40px 30px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            text-align: center;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .blob {
-            position: absolute;
-            filter: blur(120px);
-            z-index: -1;
-            opacity: 0.6;
-            pointer-events: none;
-        }
-
+        .container { width: 100%; max-width: 480px; background: var(--container-bg); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid var(--container-border); border-radius: 24px; padding: 40px 30px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); text-align: center; position: relative; overflow: hidden; }
+        .blob { position: absolute; filter: blur(120px); z-index: -1; opacity: 0.6; pointer-events: none; }
         .blob-1 { width: 400px; height: 400px; background: #60a5fa; top: -200px; left: -200px; border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; animation: move-1 30s infinite cubic-bezier(0.4, 0, 0.2, 1) alternate; }
         .blob-2 { width: 350px; height: 350px; background: #c084fc; top: -100px; right: -150px; border-radius: 60% 40% 30% 70% / 50% 60% 40% 50%; animation: move-2 35s infinite cubic-bezier(0.4, 0, 0.2, 1) alternate-reverse; }
         .blob-3 { width: 380px; height: 380px; background: #22d3ee; bottom: -200px; left: -100px; border-radius: 50% 50% 40% 60% / 60% 40% 50% 50%; animation: move-3 40s infinite cubic-bezier(0.4, 0, 0.2, 1) alternate; }
@@ -184,12 +306,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .status-loading { color: var(--text-muted); }
         .status-success { color: var(--success); }
         .status-error { color: var(--error); }
-        
+
         @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.1); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
         .switching svg { animation: pulse 1s infinite; stroke: var(--accent); }
         .switching { border-color: var(--btn-hover-border); background: var(--btn-hover-bg); }
 
-        /* Advanced Section */
         .advanced-section { margin-top: 30px; text-align: left; border-top: 1px solid var(--container-border); padding-top: 20px; }
         .advanced-summary { cursor: pointer; font-weight: 600; color: var(--text-muted); display: flex; align-items: center; gap: 10px; font-size: 1.1rem; list-style: none; transition: color 0.3s ease; user-select: none; }
         .advanced-summary::-webkit-details-marker { display: none; }
@@ -215,10 +336,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .btn-update:disabled { opacity: 0.5; cursor: not-allowed; }
         .btn-icon { background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: all 0.2s; }
         .btn-icon:hover { color: var(--accent); background: rgba(255,255,255,0.05); }
-        .btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
-        .hint-icon { color: var(--text-muted); margin-left: 5px; cursor: help; display: inline-flex; align-items: center; vertical-align: middle; }
-        .hint-icon:hover { color: var(--accent); }
-        
+
         .btn-update-all { width: 100%; margin-top: 15px; padding: 12px; font-size: 1rem; background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text-main); border-radius: 8px; cursor: pointer; transition: all 0.2s; }
         .btn-update-all:hover { background: var(--btn-hover-bg); border-color: var(--accent); }
 
@@ -249,7 +367,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="blob blob-3"></div>
     <h1>SW411</h1>
     <p class="subtitle">HDMI Matrix Control</p>
-    
+
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding: 0 5px;">
         <span id="last-synced" style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Last synced: Never</span>
         <button class="btn-icon" title="Update Source" onclick="fetchStatus('in_source', this)"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
@@ -273,13 +391,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="btn-content"><span class="label">{{ input4 }}</span><span class="sub-label">Input 4</span></div>
         </button>
     </div>
-    
+
     <div id="status-msg"></div>
 
-    <details class="advanced-section" ontoggle="toggleAdvanced(this)">
+    <details class="advanced-section">
         <summary class="advanced-summary">Advanced</summary>
         <div class="advanced-content">
-            
+
             <div class="info-grid">
                 <div class="info-item">
                     <div style="display:flex; align-items:center; gap: 5px;">
@@ -301,73 +419,49 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             <div class="status-grid">
                 <div class="status-row">
-                    <span class="status-label">
-                        Power
-                        <br><span style="font-size: 0.7rem; font-style: italic;">May report ON when LED indicates OFF.</span>
-                        <span id="ts-power" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Power<br><span style="font-size: 0.7rem; font-style: italic;">May report ON when LED indicates OFF.</span><span id="ts-power" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-power" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('power', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        Active Source
-                        <span id="ts-in_source" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Active Source<span id="ts-in_source" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-in_source" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('in_source', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
-                        
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        Temperature
-                        <span id="ts-temperature" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Temperature<span id="ts-temperature" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-temperature" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('temperature', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        Auto Switch
-                        <span id="ts-auto_switch" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Auto Switch<span id="ts-auto_switch" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-auto_switch" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('auto_switch', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        Auto Mode
-                        <span id="ts-auto_mode" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Auto Mode<span id="ts-auto_mode" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-auto_mode" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('auto_mode', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        eARC
-                        <span id="ts-earc" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">eARC<span id="ts-earc" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-earc" class="status-val">-</span>
                         <button class="btn-icon" title="Update" onclick="fetchStatus('earc', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
                     </div>
                 </div>
                 <div class="status-row">
-                    <span class="status-label">
-                        Debug Log
-                        <br><span style="font-size: 0.7rem; font-style: italic;">Only reports state when changing debug mode.</span>
-                        <span id="ts-debug_log" class="status-ts"></span>
-                    </span>
+                    <span class="status-label">Debug Log<br><span style="font-size: 0.7rem; font-style: italic;">Only reports state when changing debug mode.</span><span id="ts-debug_log" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-debug_log" class="status-val">-</span>
                     </div>
@@ -438,25 +532,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let statusTimeout;
     let isRecording = false;
     let recordedLogs = [];
+    let lastLogId = -1;
     let lastRecordedId = -1;
     let stateTimestamps = {};
-    let isCommandExecuting = false;
     let pollIntervalId = null;
+    let logsIntervalId = null;
+    let tsIntervalId = null;
+    let terminalVisible = false;
     const ALL_KEYS = ['type','fw_version','temperature','power','auto_switch','auto_mode','earc','in_source','debug_log'];
-    
+
     function showStatus(message, type) {
         const statusEl = document.getElementById('status-msg');
         statusEl.innerText = message;
         statusEl.className = `show status-${type}`;
-        
         clearTimeout(statusTimeout);
         if (type !== 'loading') {
             statusTimeout = setTimeout(() => { statusEl.classList.remove('show'); }, 3000);
         }
     }
 
-    function toggleAdvanced(details) {
-        // No width expansion anymore
+    // Single helper to restore a button to its idle look, used by every
+    // request handler so the reset logic lives in exactly one place.
+    function resetButton(btn) {
+        if (!btn) return;
+        btn.classList.remove('switching');
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.pointerEvents = 'auto';
     }
 
     function formatTimeDiff(epochSecs) {
@@ -475,98 +577,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         ALL_KEYS.forEach(key => {
             const tsEl = document.getElementById(`ts-${key}`);
             if (tsEl && stateTimestamps[key]) {
-                tsEl.innerHTML =
-                    (["type", "fw_version"].includes(key) ? "" : "<br>") +
-                    formatTimeDiff(stateTimestamps[key]);
+                tsEl.innerHTML = (["type", "fw_version"].includes(key) ? "" : "<br>") + formatTimeDiff(stateTimestamps[key]);
             }
         });
-        // Update the source selector sync label
         const syncEl = document.getElementById('last-synced');
         if (stateTimestamps['in_source']) {
             syncEl.innerText = 'Last synced: ' + formatTimeDiff(stateTimestamps['in_source']);
         }
     }
-    setInterval(refreshAllTimestamps, 1000);
 
-    function updateUIState(state, timestamps) {
-        if (timestamps) {
-            Object.assign(stateTimestamps, timestamps);
+    // Completely "Dumb" UI rendering - relies 100% on Python's logic
+    function updateUIState(ui, timestamps) {
+        if (timestamps) Object.assign(stateTimestamps, timestamps);
+
+        // Render all text strings supplied by Python
+        for (const [key, val] of Object.entries(ui.texts)) {
+            const el = document.getElementById(`val-${key}`);
+            if (el) el.innerText = val;
         }
 
-        if (state.type !== 'Unknown') document.getElementById('val-type').innerText = state.type;
-        if (state.fw_version !== 'Unknown') document.getElementById('val-fw_version').innerText = state.fw_version;
-        if (state.temperature !== 'Unknown') document.getElementById('val-temperature').innerText = state.temperature + ' °C';
-        if (state.power !== 'Unknown') document.getElementById('val-power').innerText = state.power;
-        if (state.auto_switch !== 'Unknown') document.getElementById('val-auto_switch').innerText = state.auto_switch;
-        
-        let modeText = state.auto_mode;
-        if (modeText !== 'Unknown') {
-            if (modeText.toLowerCase().includes('5v')) modeText = '1: 5V';
-            else if (modeText.toLowerCase().includes('clock')) modeText = '0: Clock';
-        }
-        if (state.auto_mode !== 'Unknown') document.getElementById('val-auto_mode').innerText = modeText;
-        
-        if (state.earc !== 'Unknown') document.getElementById('val-earc').innerText = state.earc;
-        if (state.debug_log !== 'Unknown') {
-            document.getElementById('val-debug_log').innerText = state.debug_log;
-            const terminal = document.getElementById('terminal-section');
-            if (state.debug_log === 'on') {
-                terminal.style.display = 'block';
-                updateLogs();
-            } else {
-                terminal.style.display = 'none';
-            }
-        }
-        if (state.in_source !== 'Unknown') {
-            const inSourceEl = document.getElementById('val-in_source');
-            if (inSourceEl) inSourceEl.innerText = 'Input ' + state.in_source;
-        }
+        // Toggle terminal display + remember state so log polling can be
+        // fully suppressed while debug/terminal is disabled.
+        terminalVisible = !!ui.show_terminal;
+        const terminal = document.getElementById('terminal-section');
+        terminal.style.display = terminalVisible ? 'block' : 'none';
 
-        refreshAllTimestamps();
-
-        // Active States for Source Buttons
-        document.querySelectorAll('.source-btn').forEach(btn => btn.classList.remove('active'));
-        if (state.in_source !== 'Unknown') {
-            const activeBtn = document.getElementById(`btn-${state.in_source}`);
-            if (activeBtn) activeBtn.classList.add('active');
-        }
-
-        // Active States for Controls
-        const btnMappings = [
-            { id: 'btn-power-on', val: state.power === 'on' },
-            { id: 'btn-power-off', val: state.power === 'off' },
-            { id: 'btn-autoswitch-on', val: state.auto_switch === 'on' },
-            { id: 'btn-autoswitch-off', val: state.auto_switch === 'off' },
-            { id: 'btn-automode-1', val: modeText === '1: 5V' },
-            { id: 'btn-automode-0', val: modeText === '0: Clock' },
-            { id: 'btn-earc-on', val: state.earc === 'on' },
-            { id: 'btn-earc-off', val: state.earc === 'off' },
-            { id: 'btn-debuglog-on', val: state.debug_log === 'on' },
-            { id: 'btn-debuglog-off', val: state.debug_log === 'off' }
-        ];
-        btnMappings.forEach(m => {
-            const el = document.getElementById(m.id);
-            if (el) {
-                if (m.val) el.classList.add('active');
-                else el.classList.remove('active');
+        // Clear all buttons, then activate the ones Python told us to
+        document.querySelectorAll('.source-btn, .control-btn').forEach(btn => btn.classList.remove('active'));
+        ui.active_buttons.forEach(id => {
+            if (id) {
+                const el = document.getElementById(id);
+                if (el) el.classList.add('active');
             }
         });
+
+        refreshAllTimestamps();
     }
 
     function sendCommand(cmd, btnElement) {
-        isCommandExecuting = true;
-        if(btnElement && btnElement.classList.contains('source-btn')) {
-            document.querySelectorAll('.source-btn').forEach(btn => btn.classList.remove('switching'));
-            btnElement.classList.add('switching');
-            showStatus(`Executing command...`, 'loading');
-        } else {
-            showStatus(`Sending...`, 'loading');
-            if(btnElement) {
+        showStatus('Sending...', 'loading');
+        if (btnElement) {
+            if (btnElement.classList.contains('source-btn')) {
+                document.querySelectorAll('.source-btn').forEach(btn => btn.classList.remove('switching'));
+                btnElement.classList.add('switching');
+            } else {
                 btnElement.disabled = true;
                 btnElement.style.opacity = '0.5';
             }
         }
-        
+
         fetch('/api/command', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -574,34 +633,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         })
         .then(response => response.json())
         .then(data => {
-            if(btnElement) {
-                btnElement.classList.remove('switching');
-                btnElement.disabled = false;
-                btnElement.style.opacity = '1';
-            }
-            if (data.error) {
-                showStatus(data.error, 'error');
-            } else {
-                showStatus(data.message || 'Success', 'success');
-                if (data.state) updateUIState(data.state, data.timestamps);
-            }
-            updateLogs();
-            isCommandExecuting = false;
+            resetButton(btnElement);
+            if (data.error) showStatus(data.error, 'error');
+            else showStatus(data.message || 'Sent', 'success');
         })
         .catch(e => {
-            if(btnElement) {
-                btnElement.classList.remove('switching');
-                btnElement.disabled = false;
-                btnElement.style.opacity = '1';
-            }
+            resetButton(btnElement);
             showStatus('Network error occurred.', 'error');
-            isCommandExecuting = false;
         });
     }
 
     function fetchStatus(type, btnElement) {
-        isCommandExecuting = true;
-        if(btnElement) {
+        if (btnElement) {
             btnElement.style.opacity = '0.5';
             btnElement.style.pointerEvents = 'none';
         }
@@ -609,25 +652,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         fetch(`/api/status?type=${type}`)
         .then(r => r.json())
         .then(data => {
-            if(btnElement) {
-                btnElement.style.opacity = '1';
-                btnElement.style.pointerEvents = 'auto';
-            }
-            if (data.error) {
-                showStatus(data.error, 'error');
-            } else {
-                updateUIState(data.state, data.timestamps);
-            }
-            updateLogs();
-            isCommandExecuting = false;
+            resetButton(btnElement);
+            if (data.error) showStatus(data.error, 'error');
+            else showStatus('Status requested', 'success');
         })
         .catch(e => {
-            if(btnElement) {
-                btnElement.style.opacity = '1';
-                btnElement.style.pointerEvents = 'auto';
-            }
+            resetButton(btnElement);
             showStatus('Failed to fetch status', 'error');
-            isCommandExecuting = false;
         });
     }
 
@@ -674,32 +705,46 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         URL.revokeObjectURL(url);
     }
 
+    // Highly efficient terminal DOM updater
     function updateLogs() {
-        if (document.getElementById('terminal-section').style.display === 'none') return;
-        fetch('/api/logs')
+        // Do not poll/fetch device logs at all while the terminal is hidden.
+        if (!terminalVisible) return;
+
+        fetch(`/api/logs?since_id=${lastLogId}`)
             .then(r => r.json())
             .then(logs => {
+                if (!logs || logs.length === 0) return;
+
                 const term = document.getElementById('terminal-output');
                 const isScrolledToBottom = term.scrollHeight - term.clientHeight <= term.scrollTop + 2;
-                
-                let htmlContent = [];
+                const frag = document.createDocumentFragment();
+
                 logs.forEach(log => {
+                    const div = document.createElement('div');
                     if (log.type === 'rx') {
-                        htmlContent.push(`<div style="color: #f8fafc;">${log.html}</div>`);
+                        div.style.color = '#f8fafc';
+                        div.innerHTML = log.html;
                     } else {
-                        htmlContent.push(`<div style="color: #38bdf8; font-weight: bold;">> ${log.html}</div>`);
+                        div.style.color = '#38bdf8';
+                        div.style.fontWeight = 'bold';
+                        div.innerHTML = '> ' + log.html;
                     }
-                    
+                    frag.appendChild(div);
+
                     if (isRecording && log.id > lastRecordedId) {
                         recordedLogs.push((log.type === 'tx' ? '> ' : '') + log.raw);
                     }
+                    lastLogId = log.id;
+                    lastRecordedId = log.id;
                 });
-                
-                if (logs.length > 0) {
-                    lastRecordedId = logs[logs.length - 1].id;
+
+                term.appendChild(frag);
+
+                // Cap DOM at 5000 lines to match the server-side log buffer
+                while (term.childNodes.length > 5000) {
+                    term.removeChild(term.firstChild);
                 }
-                
-                term.innerHTML = htmlContent.join('');
+
                 if (isScrolledToBottom) {
                     term.scrollTop = term.scrollHeight;
                 }
@@ -708,47 +753,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function pollCachedState() {
-        if (isCommandExecuting) return;
-        
         fetch('/api/cached_state')
             .then(r => r.json())
             .then(data => {
-                if (data.state) updateUIState(data.state, data.timestamps);
+                if (data.ui) updateUIState(data.ui, data.timestamps);
             })
             .catch(() => {});
     }
 
     function startPolling() {
-        if (!pollIntervalId) {
-            pollIntervalId = setInterval(pollCachedState, 3000);
-        }
+        // Normal UI/state refresh every 1s
+        if (!pollIntervalId) pollIntervalId = setInterval(pollCachedState, 1000);
+        // Terminal logs poll more frequently, every 0.5s
+        if (!logsIntervalId) logsIntervalId = setInterval(updateLogs, 500);
+        // "x ago" labels tick once per second, but only while visible
+        if (!tsIntervalId) tsIntervalId = setInterval(refreshAllTimestamps, 1000);
     }
 
     function stopPolling() {
-        if (pollIntervalId) {
-            clearInterval(pollIntervalId);
-            pollIntervalId = null;
-        }
+        if (pollIntervalId) { clearInterval(pollIntervalId); pollIntervalId = null; }
+        if (logsIntervalId) { clearInterval(logsIntervalId); logsIntervalId = null; }
+        if (tsIntervalId) { clearInterval(tsIntervalId); tsIntervalId = null; }
     }
 
     document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") {
-            pollCachedState(); // Instantly poll on return to focus
+            pollCachedState();
+            updateLogs();
             startPolling();
         } else {
             stopPolling();
         }
     });
 
-    // Initial setup on page load
     if (document.visibilityState === "visible") {
         pollCachedState();
+        updateLogs();
         startPolling();
     }
-
 </script>
 </body>
 </html>"""
+
 
 def find_sw411_port():
     for port in serial.tools.list_ports.comports():
@@ -756,48 +802,9 @@ def find_sw411_port():
             return port.device
     return None
 
-def send_and_wait(ser, cmd_bytes, expected_patterns=None, timeout=1.0):
-    if not expected_patterns:
-        expected_patterns = []
-        
-    ser.reset_input_buffer()
-    ser.write(cmd_bytes)
-    
-    if not expected_patterns:
-        time.sleep(0.15)
-        while ser.in_waiting:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if line:
-                print(f"[Device] {line}")
-                add_device_log(line, "rx")
-                parse_line(line)
-        return True
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if ser.in_waiting:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if line:
-                print(f"[Device] {line}")
-                add_device_log(line, "rx")
-                parse_line(line)
-                if any(p in line.lower() for p in expected_patterns):
-                    return line
-        time.sleep(0.02)
-    return None
-
-def get_status_patterns(status_type):
-    if status_type == 'temperature': return [b"r temperature!", ["gsv chip temperature:"]]
-    if status_type == 'power': return [b"r power!", ["power on", "power off"]]
-    if status_type == 'auto_switch': return [b"r auto switch!", ["auto switch:"]]
-    if status_type == 'auto_mode': return [b"r auto mode!", ["auto switch mode:"]]
-    if status_type == 'earc': return [b"r earc!", ["earc:"]]
-    if status_type == 'in_source': return [b"r in source!", ["output->input"]]
-    return None, None
 
 @app.route('/')
 def index():
-    # Pass the stored names as keyword arguments to be parsed by Jinja
     return render_template_string(
         HTML_TEMPLATE,
         input1=input_names[1],
@@ -806,117 +813,62 @@ def index():
         input4=input_names[4]
     )
 
+
 @app.route('/api/cached_state', methods=['GET'])
 def cached_state():
-    return jsonify({"state": state, "timestamps": state_timestamps})
+    ui = generate_ui_state()
+    with state_lock:
+        ts = dict(state_timestamps)
+    return jsonify({"ui": ui, "timestamps": ts})
+
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    global target_port, state
     status_type = request.args.get('type', 'all')
-    
-    if not target_port:
-        return jsonify({"error": "Serial port not configured"}), 500
 
-    with serial_lock:
-        ser = None
-        try:
-            ser = serial.Serial(target_port, 115200, timeout=0.1)
-            
-            queries = []
-            if status_type == 'all':
-                queries = ['type', 'fw_version', 'temperature', 'power', 'auto_switch', 'auto_mode', 'earc', 'in_source']
-            else:
-                queries = [status_type]
-                
-            for q in queries:
-                if q == 'type':
-                    send_and_wait(ser, b"r type!", ["switcher"], 0.5)
-                elif q == 'fw_version':
-                    send_and_wait(ser, b"r fw version!", ["mcu fw version:"], 0.5)
-                else:
-                    cmd_bytes, patterns = get_status_patterns(q)
-                    if cmd_bytes:
-                        add_device_log(cmd_bytes.decode('utf-8').strip(), "tx")
-                        send_and_wait(ser, cmd_bytes, patterns, 0.5)
-                        
-            return jsonify({"state": state, "timestamps": state_timestamps})
-        except Exception as e:
-            print(f"Serial Error: {e}")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            if ser and ser.is_open:
-                ser.close()
+    if not is_serial_connected():
+        return jsonify({"error": "Serial disconnected"}), 500
+
+    queries = ALL_STATUS_ORDER if status_type == 'all' else [status_type]
+
+    for q in queries:
+        cmd = STATUS_COMMANDS.get(q)
+        if cmd:
+            send_serial_cmd(cmd)
+            time.sleep(0.05)
+
+    return jsonify({"message": "Status requested"})
+
 
 @app.route('/api/command', methods=['POST'])
 def handle_command():
-    global target_port, state
-    data = request.json
+    data = request.get_json(silent=True) or {}
     cmd_str = data.get('command')
-    
+
     if not cmd_str:
         return jsonify({"error": "No command provided"}), 400
 
     cmd_str = cmd_str.rstrip('!') + '!'
-    cmd_bytes = cmd_str.encode('utf-8')
 
-    if not target_port:
-        return jsonify({"error": "Serial port not configured"}), 500
+    if not is_serial_connected():
+        return jsonify({"error": "Serial port disconnected"}), 500
 
-    with serial_lock:
-        ser = None
-        try:
-            ser = serial.Serial(target_port, 115200, timeout=0.1)
-            
-            # Poll power state ONCE before executing action commands (unless it's a power command)
-            if not cmd_str.lower().startswith("power"):
-                print(f"Checking power state before command: {cmd_str}")
-                add_device_log("r power!", "tx")
-                power_response = send_and_wait(ser, b"r power!", ["power on", "power off"], timeout=1.0)
-                
-                if not power_response or "power off" in power_response.lower():
-                    return jsonify({"error": "Device is powered off"}), 400
+    if send_serial_cmd(cmd_str):
+        return jsonify({"message": "Command sent"})
+    return jsonify({"error": "Failed to write to device"}), 500
 
-            # Execute actual command
-            add_device_log(cmd_str, "tx")
-            
-            # Find expected patterns for parsing
-            patterns = []
-            c = cmd_str.lower()
-            if "auto mode" in c: patterns = ["auto switch mode:"]
-            elif "auto switch" in c: patterns = ["auto switch:"]
-            elif "source" in c: patterns = ["output->input"]
-            elif "earc" in c: patterns = ["earc:"]
-            elif "debug log" in c: patterns = ["debug log"]
-            elif "power" in c: patterns = ["power on", "power off"]
-            
-            send_and_wait(ser, cmd_bytes, patterns, timeout=1.5)
-            
-            # Allow trailing output to be processed
-            time.sleep(0.1)
-            while ser.in_waiting:
-                line = ser.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    print(f"[Device] {line}")
-                    add_device_log(line, "rx")
-                    parse_line(line)
-
-            return jsonify({"message": "Command executed", "state": state, "timestamps": state_timestamps})
-            
-        except Exception as e:
-            print(f"Serial Error: {e}")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            if ser and ser.is_open:
-                ser.close()
 
 @app.route('/api/logs', methods=['GET'])
 def get_logs():
     try:
-        logs_list = list(device_logs.copy())
-    except RuntimeError:
-        logs_list = []
-    return jsonify(logs_list)
+        since_id = int(request.args.get('since_id', -1))
+    except (TypeError, ValueError):
+        since_id = -1
+
+    with state_lock:
+        new_logs = [log for log in device_logs if log['id'] > since_id]
+    return jsonify(new_logs)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Feintech SW411 Simple Web Remote")
@@ -924,16 +876,14 @@ if __name__ == '__main__':
     parser.add_argument('--auto-port', action='store_true', help='Auto detect based on VID/PID')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind')
     parser.add_argument('--web-port', type=int, default=5000, help='Port to bind')
-    
-    # New Arguments for Input Sources
+
     parser.add_argument('--input-1', type=str, default='Unnamed 1', help='Label for Input 1')
     parser.add_argument('--input-2', type=str, default='Unnamed 2', help='Label for Input 2')
     parser.add_argument('--input-3', type=str, default='Unnamed 3', help='Label for Input 3')
     parser.add_argument('--input-4', type=str, default='Unnamed 4', help='Label for Input 4')
-    
+
     args = parser.parse_args()
 
-    # Load custom input names into the global dictionary
     input_names[1] = args.input_1
     input_names[2] = args.input_2
     input_names[3] = args.input_3
@@ -949,5 +899,8 @@ if __name__ == '__main__':
         else:
             print(f"Could not auto-detect, falling back to default port: {target_port}")
 
+    reader_thread = threading.Thread(target=serial_reader_loop, daemon=True)
+    reader_thread.start()
+
     print(f"Starting simple web server on http://{args.host}:{args.web_port}")
-    app.run(host=args.host, port=args.web_port)
+    app.run(host=args.host, port=args.web_port, use_reloader=False)
