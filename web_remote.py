@@ -29,6 +29,7 @@ state = {
     "auto_switch": None,
     "auto_mode": None,
     "earc": None,
+    "standby_mode": None,
     "in_source": None,
     "debug_log": None
 }
@@ -59,13 +60,14 @@ STATUS_COMMANDS = {
     "auto_switch": "r auto switch!",
     "auto_mode": "r auto mode!",
     "earc": "r earc!",
+    "standby_mode": "r stanby mode!",
     "in_source": "r in source!",
 }
 # Order used when the client asks for "all" (debug_log intentionally excluded:
 # the device only reports it when the debug mode is toggled).
 ALL_STATUS_ORDER = [
     "type", "fw_version", "temperature", "power",
-    "auto_switch", "auto_mode", "earc", "in_source",
+    "auto_switch", "auto_mode", "earc", "standby_mode", "in_source",
 ]
 
 
@@ -121,6 +123,9 @@ def parse_line(line):
     elif line_lower.startswith("earc"):
         val = line_lower.split("earc", 1)[-1].strip()
         _update_state("earc", val in ["on", "1"])
+    elif line_lower.startswith("one_touch_standy_mode"):
+        val = line_lower.split("one_touch_standy_mode", 1)[-1].strip()
+        _update_state("standby_mode", val in ["on", "1"])
     elif "power on" in line_lower:
         _update_state("power", True)
     elif "power off" in line_lower:
@@ -150,6 +155,7 @@ def generate_ui_state():
             "auto_switch": "On" if s["auto_switch"] is True else "Off" if s["auto_switch"] is False else "-",
             "auto_mode": "1: 5V" if s["auto_mode"] == 1 else "0: Clock" if s["auto_mode"] == 0 else "-",
             "earc": "On" if s["earc"] is True else "Off" if s["earc"] is False else "-",
+            "standby_mode": "On" if s["standby_mode"] is True else "Off" if s["standby_mode"] is False else "-",
             "in_source": f"Input {s['in_source']}" if s["in_source"] is not None else "-",
             "debug_log": "On" if s["debug_log"] is True else "Off" if s["debug_log"] is False else "-"
         },
@@ -162,6 +168,8 @@ def generate_ui_state():
             "btn-automode-0" if s["auto_mode"] == 0 else None,
             "btn-earc-on" if s["earc"] is True else None,
             "btn-earc-off" if s["earc"] is False else None,
+            "btn-standbymode-on" if s["standby_mode"] is True else None,
+            "btn-standbymode-off" if s["standby_mode"] is False else None,
             "btn-debuglog-on" if s["debug_log"] is True else None,
             "btn-debuglog-off" if s["debug_log"] is False else None,
             f"btn-{s['in_source']}" if s["in_source"] is not None else None
@@ -461,6 +469,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 </div>
                 <div class="status-row">
+                    <span class="status-label">Standby Mode<span id="ts-standby_mode" class="status-ts"></span></span>
+                    <div style="display:flex; align-items:center;">
+                        <span id="val-standby_mode" class="status-val">-</span>
+                        <button class="btn-icon" title="Update" onclick="fetchStatus('standby_mode', this)"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg></button>
+                    </div>
+                </div>
+                <div class="status-row">
                     <span class="status-label">Debug Log<br><span style="font-size: 0.7rem; font-style: italic;">Only reports state when changing debug mode.</span><span id="ts-debug_log" class="status-ts"></span></span>
                     <div style="display:flex; align-items:center;">
                         <span id="val-debug_log" class="status-val">-</span>
@@ -496,6 +511,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="btn-row">
                         <button class="control-btn" id="btn-earc-on" onclick="sendCommand('s earc 1!', this)">On</button>
                         <button class="control-btn" id="btn-earc-off" onclick="sendCommand('s earc 0!', this)">Off</button>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <span class="label">Standby Mode</span>
+                    <div class="btn-row">
+                        <button class="control-btn" id="btn-standbymode-on" onclick="sendCommand('s stanby mode 1!', this)">On</button>
+                        <button class="control-btn" id="btn-standbymode-off" onclick="sendCommand('s stanby mode 0!', this)">Off</button>
                     </div>
                 </div>
                 <div class="control-group">
@@ -539,7 +561,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let logsIntervalId = null;
     let tsIntervalId = null;
     let terminalVisible = false;
-    const ALL_KEYS = ['type','fw_version','temperature','power','auto_switch','auto_mode','earc','in_source','debug_log'];
+    const ALL_KEYS = ['type','fw_version','temperature','power','auto_switch','auto_mode','earc','standby_mode','in_source','debug_log'];
 
     function showStatus(message, type) {
         const statusEl = document.getElementById('status-msg');
